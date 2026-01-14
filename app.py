@@ -106,4 +106,65 @@ try:
                 new_qty = col_qty.number_input(
                     "수량", 
                     min_value=1, 
-                    value=current_qty,
+                    value=current_qty, 
+                    key=f"edit_{item_id}", 
+                    label_visibility="collapsed"
+                )
+                if new_qty != current_qty:
+                    st.session_state.cart[item_id] = new_qty
+                    st.rerun() # 수량 변경 시 즉시 합계 재계산
+                
+                # 3. 삭제 버튼
+                if col_del.button("❌", key=f"del_{item_id}"):
+                    del st.session_state.cart[item_id]
+                    st.rerun()
+                
+                # 소계 계산 및 표시
+                subtotal = item_info['PRICE_NUM'] * st.session_state.cart[item_id]
+                total_p += subtotal
+                st.write(f"소계: **{subtotal:,.0f}원**")
+                st.divider()
+
+        st.warning(f"### **최종 합계 금액: {total_p:,.0f}원**")
+        
+        c1, c2 = st.columns(2)
+        if c1.button("🗑️ 전체 비우기", use_container_width=True):
+            st.session_state.cart = {}
+            st.session_state.order_mode = False
+            st.rerun()
+            
+        if c2.button("📝 주문서 작성하기", use_container_width=True):
+            st.session_state.order_mode = True
+
+        # 5. 주문 정보 입력 양식
+        if st.session_state.order_mode:
+            st.markdown("---")
+            with st.form("final_order_form"):
+                name = st.text_input("주문자 성함")
+                addr = st.text_area("배송지 주소")
+                phone = st.text_input("연락처")
+                
+                if st.form_submit_button("최종 주문 완료", use_container_width=True):
+                    if name and addr and phone:
+                        sheet = get_google_sheet()
+                        if sheet:
+                            now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                            
+                            summary = []
+                            for d, q in st.session_state.cart.items():
+                                itm = df[df['Display'] == d].iloc[0]['ItemName']
+                                summary.append(f"{itm}({q}개)")
+                            items_summary = ", ".join(summary)
+                            
+                            sheet.append_row([now, name, phone, addr, items_summary, f"{total_p:,.0f}원"])
+                            st.balloons()
+                            st.success("✅ 주문이 완료되었습니다!")
+                            st.session_state.cart = {}
+                            st.session_state.order_mode = False
+                    else:
+                        st.error("배송 정보를 모두 입력해 주세요.")
+    else:
+        st.info("주문 목록에 담긴 상품이 없습니다.")
+
+except Exception as e:
+    st.error(f"애플리케이션 오류: {e}")
