@@ -9,22 +9,22 @@ from google.oauth2.service_account import Credentials
 # 1. 페이지 설정
 st.set_page_config(page_title="재고 상품 주문 시스템", layout="wide")
 
-# 구글 시트 연결 함수
 def get_google_sheet():
     try:
-        # Streamlit Secrets에서 서비스 계정 정보 로드
-        json_info = st.secrets["google_service_account_json"].strip()
-        credentials_info = json.loads(json_info)
+        # JSON 문자열을 로드하는 대신, Secrets에 정의된 딕셔너리 구조를 직접 가져옵니다.
+        # 이 방식은 'Control character' 에러를 방지합니다.
+        credentials_info = st.secrets["gcp_service_account"]
         
         scopes = [
             "https://www.googleapis.com/auth/spreadsheets",
             "https://www.googleapis.com/auth/drive"
         ]
         
+        # 딕셔너리 데이터를 바로 사용하여 인증 정보를 만듭니다.
         creds = Credentials.from_service_account_info(credentials_info, scopes=scopes)
         client = gspread.authorize(creds)
         
-        # 제공해주신 시트 주소 적용
+        # 제공해주신 시트 주소
         SPREADSHEET_URL = "https://docs.google.com/spreadsheets/d/1n2k5EvRj_DMhkb8XWyY3-WghTfdaXFumeZkv3cnba3w/edit"
         sheet = client.open_by_url(SPREADSHEET_URL).sheet1
         return sheet
