@@ -13,7 +13,7 @@ st.set_page_config(page_title="재고 상품 주문 시스템", layout="wide")
 def get_google_sheet():
     try:
         # Streamlit Secrets에서 서비스 계정 정보 로드
-        json_info = st.secrets["google_service_account_json"]
+        json_info = st.secrets["google_service_account_json"].strip()
         credentials_info = json.loads(json_info)
         
         scopes = [
