@@ -6,7 +6,7 @@ import urllib.parse
 st.set_page_config(page_title="재고 상품 가격 검색기", layout="centered")
 
 st.title("🛍️ 상품명 기반 네이버 쇼핑 검색기")
-st.write("ItemName 전문을 사용하여 실시간 최저가를 더 정확하게 검색합니다.")
+st.write("FRESHMAN 화이팅")
 
 # 2. 데이터 불러오기
 @st.cache_data
