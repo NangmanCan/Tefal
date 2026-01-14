@@ -47,7 +47,7 @@ try:
             st.success(f"### **실제 구매가: {product_info['PRICE']}원**")
             # 기준가(Go Price)를 보조 정보로 표시
             st.write(f"**기준가(Go Price):** {product_info['Go Price(판매가)']}원")
-            st.caption("※ '실제 구매가'는 앱 내 결제 시 적용되는 가격입니다.")
+            st.caption("※ '실제 구매가'는 최병 친구에게 구매하는 가격임")
 
         # 5. 검색 쿼리 최적화
         search_query = product_info['ItemName']
