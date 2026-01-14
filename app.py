@@ -40,12 +40,16 @@ try:
         with col1:
             st.info(f"**상품명:** {product_info['ItemName']}")
             st.write(f"**브랜드:** {product_info['Brand']}")
-        with col2:
-            st.success(f"**기존 판매가:** {product_info['Go Price(판매가)']}원")
             st.write(f"**모델번호:** {product_info['Commercial']}")
 
+        with col2:
+            # 실제 구매가(PRICE)를 강조하여 표시
+            st.success(f"### **실제 구매가: {product_info['PRICE']}원**")
+            # 기준가(Go Price)를 보조 정보로 표시
+            st.write(f"**기준가(Go Price):** {product_info['Go Price(판매가)']}원")
+            st.caption("※ '실제 구매가'는 앱 내 결제 시 적용되는 가격입니다.")
+
         # 5. 검색 쿼리 최적화
-        # ItemName 전문을 사용하되, URL에 들어갈 수 있도록 특수문자를 인코딩합니다.
         search_query = product_info['ItemName']
         encoded_query = urllib.parse.quote(search_query)
         naver_url = f"https://search.shopping.naver.com/search/all?query={encoded_query}"
