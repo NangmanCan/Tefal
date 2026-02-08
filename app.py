@@ -1,170 +1,347 @@
 import streamlit as st
-import pandas as pd
-import urllib.parse
-from datetime import datetime
-import gspread
+import cloudscraper
 import json
-from google.oauth2.service_account import Credentials
+import random
+import re
+from difflib import SequenceMatcher
+from collections import Counter
 
-# 1. 페이지 설정
-st.set_page_config(page_title="재고 상품 관리 시스템", layout="wide")
+st.set_page_config(page_title="올리브영 리뷰 생성기", layout="wide")
+st.title("🧴 올리브영 리뷰 생성기")
+st.caption("상품명을 입력하면 올리브영에서 유사 상품을 찾아 리뷰를 조합해 새로운 리뷰를 만들어드립니다.")
 
-# 구글 시트 연결 함수
-def get_google_sheet():
+# ─── Constants ───
+SEARCH_API = "https://www.oliveyoung.co.kr/store/search/NewMainSearchApi.do"
+IMG_BASE = "https://image.oliveyoung.co.kr/cfimages/cf-goods/uploads/images/thumbnails/"
+PRODUCT_URL = "https://www.oliveyoung.co.kr/store/goods/getGoodsDetail.do?goodsNo="
+
+
+# ─── HTTP Client ───
+@st.cache_resource
+def get_scraper():
+    return cloudscraper.create_scraper()
+
+
+# ─── API Functions ───
+def search_oliveyoung(query, count=20):
+    """올리브영 검색 API 호출"""
     try:
-        credentials_info = st.secrets["gcp_service_account"]
-        scopes = ["https://www.googleapis.com/auth/spreadsheets", "https://www.googleapis.com/auth/drive"]
-        creds = Credentials.from_service_account_info(credentials_info, scopes=scopes)
-        client = gspread.authorize(creds)
-        
-        # 지정된 시트 주소
-        SPREADSHEET_URL = "https://docs.google.com/spreadsheets/d/1n2k5EvRj_DMhkb8XWyY3-WghTfdaXFumeZkv3cnba3w/edit"
-        sheet = client.open_by_url(SPREADSHEET_URL).sheet1
-        return sheet
+        scraper = get_scraper()
+        resp = scraper.post(
+            SEARCH_API,
+            data={
+                "query": query,
+                "listnum": count,
+                "startCount": 0,
+                "sort": "",
+                "displayMediaTypes": "02",
+            },
+            headers={
+                "Accept": "application/json",
+                "X-Requested-With": "XMLHttpRequest",
+                "Referer": "https://www.oliveyoung.co.kr/store/search/getSearchMain.do",
+            },
+            timeout=15,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        products = []
+        for collection in data.get("Data", []):
+            if collection.get("CollName") == "OLIVE_GOODS":
+                for item in collection.get("Result", []):
+                    products.append({
+                        "goods_no": item.get("GOODS_NO", ""),
+                        "name": item.get("GOODS_NM", ""),
+                        "brand": item.get("ONL_BRND_NM", ""),
+                        "price": item.get("SALE_PRC", 0),
+                        "original_price": item.get("NORM_PRC", 0),
+                        "rating": item.get("GOODS_EVAL_SCR_VAL", 0),
+                        "review_count": item.get("PRMUM_GDAS_TOT_CNT", 0),
+                        "image": IMG_BASE + item.get("IMG_PATH_NM", ""),
+                        "category": item.get("MID_CAT_NM", ""),
+                    })
+        return products
     except Exception as e:
-        st.error(f"구글 인증 오류: {e}")
-        return None
+        st.error(f"검색 오류: {e}")
+        return []
 
-st.title("🛍️ 상품 탐색 및 통합 주문 시스템")
 
-# 2. 데이터 불러오기
-@st.cache_data
-def load_data():
-    df = pd.read_csv("data.csv")
-    # PRICE 열 숫자 변환
-    df['PRICE_NUM'] = df['PRICE'].astype(str).str.replace(',', '').astype(float)
-    df['Display'] = df['NC'].astype(str) + " - " + df['ItemName']
-    return df
+def calculate_similarity(query, product_name):
+    """쿼리와 상품명 사이의 유사도 계산"""
+    query_clean = re.sub(r"[^\w\s]", "", query.lower())
+    name_clean = re.sub(r"[^\w\s]", "", product_name.lower())
 
-try:
-    df = load_data()
-    
-    # 장바구니 세션 관리 {상품ID: 수량}
-    if 'cart' not in st.session_state:
-        st.session_state.cart = {}
-    if 'order_mode' not in st.session_state:
-        st.session_state.order_mode = False
+    # SequenceMatcher 유사도
+    seq_ratio = SequenceMatcher(None, query_clean, name_clean).ratio()
 
-    # --- [상단] 3. 상품 탐색 영역 ---
-    st.subheader("🔎 1. 상품 선택")
-    
-    all_options = df['Display'].unique()
-    selected_target = st.selectbox(
-        "상품을 선택하여 상세 정보를 확인하세요",
-        all_options,
-        index=None,
-        placeholder="여기를 눌러 상품 찾기",
-        key="main_selector"
+    # 키워드 매칭 점수
+    query_words = set(query_clean.split())
+    name_words = set(name_clean.split())
+    if query_words:
+        keyword_ratio = len(query_words & name_words) / len(query_words)
+    else:
+        keyword_ratio = 0
+
+    return round((seq_ratio * 0.4 + keyword_ratio * 0.6) * 100, 1)
+
+
+# ─── Review Generation ───
+def split_sentences(text):
+    """텍스트를 문장 단위로 분리"""
+    sentences = re.split(r"(?<=[.!?~])\s+|(?<=다)\s+|(?<=요)\s+|(?<=음)\s+|\n+", text)
+    return [s.strip() for s in sentences if len(s.strip()) > 5]
+
+
+def categorize_sentences(sentences):
+    """문장을 카테고리별로 분류"""
+    categories = {
+        "purchase": [],   # 구매/배송 관련
+        "texture": [],    # 발림성/텍스처
+        "effect": [],     # 효과/결과
+        "scent": [],      # 향/냄새
+        "general": [],    # 일반 사용감
+        "recommend": [],  # 추천/재구매
+    }
+
+    rules = {
+        "purchase": ["구매", "주문", "배송", "샀", "사서", "받았", "도착", "배달", "구입", "재구매"],
+        "texture": ["발림", "텍스처", "질감", "흡수", "끈적", "촉촉", "가벼", "무거", "밀림", "들뜸", "커버", "밀착"],
+        "effect": ["효과", "피부", "보습", "건조", "좋아", "개선", "밝아", "탄력", "윤기", "촉촉", "수분", "진정", "트러블"],
+        "scent": ["향", "냄새", "무향", "향기"],
+        "recommend": ["추천", "재구매", "만족", "최고", "좋습니다", "강추", "대박", "최애", "존좋", "갓", "인생"],
+    }
+
+    for sent in sentences:
+        matched = False
+        for cat, keywords in rules.items():
+            if any(k in sent for k in keywords):
+                categories[cat].append(sent)
+                matched = True
+                break
+        if not matched:
+            categories["general"].append(sent)
+
+    return categories
+
+
+def generate_reviews(reviews_text, count=3):
+    """기존 리뷰 텍스트에서 새로운 리뷰를 생성"""
+    all_sentences = []
+    for review in reviews_text:
+        all_sentences.extend(split_sentences(review))
+
+    if len(all_sentences) < 3:
+        return ["리뷰 데이터가 부족합니다. 더 많은 리뷰를 입력해주세요."]
+
+    categories = categorize_sentences(all_sentences)
+
+    generated = []
+    category_order = ["purchase", "texture", "effect", "scent", "general", "recommend"]
+
+    for _ in range(count):
+        parts = []
+        used_cats = []
+
+        # 각 카테고리에서 랜덤으로 문장 선택
+        for cat in category_order:
+            cat_sents = categories[cat]
+            if cat_sents and random.random() > 0.3:  # 70% 확률로 카테고리 포함
+                sent = random.choice(cat_sents)
+                if sent not in parts:
+                    parts.append(sent)
+                    used_cats.append(cat)
+
+        # 최소 3문장 보장
+        while len(parts) < 3:
+            sent = random.choice(all_sentences)
+            if sent not in parts:
+                parts.append(sent)
+
+        # 최대 6문장으로 제한
+        if len(parts) > 6:
+            parts = parts[:6]
+
+        # 문장 연결
+        review_text = " ".join(parts)
+
+        # 마지막 문장 부호 정리
+        review_text = review_text.rstrip()
+        if review_text and review_text[-1] not in ".!?~":
+            review_text += "."
+
+        generated.append(review_text)
+
+    return generated
+
+
+def extract_keywords(reviews_text, top_n=15):
+    """리뷰에서 자주 등장하는 키워드 추출"""
+    stopwords = {
+        "그리고", "하지만", "그래서", "이", "그", "저", "것", "수", "등",
+        "더", "도", "를", "을", "에", "의", "가", "는", "은", "로",
+        "으로", "와", "과", "이런", "저런", "있는", "없는", "하는",
+        "정도", "때문", "같은", "있어", "없어", "아주", "매우", "너무",
+        "좀", "한", "된", "되는", "같아요", "것같아요", "합니다", "합니다",
+    }
+
+    all_text = " ".join(reviews_text)
+    words = re.findall(r"[\uac00-\ud7a3]{2,}", all_text)
+    words = [w for w in words if w not in stopwords and len(w) >= 2]
+    counter = Counter(words)
+    return counter.most_common(top_n)
+
+
+# ─── Session State ───
+if "search_results" not in st.session_state:
+    st.session_state.search_results = []
+if "selected_product" not in st.session_state:
+    st.session_state.selected_product = None
+if "reviews_input" not in st.session_state:
+    st.session_state.reviews_input = ""
+if "generated_reviews" not in st.session_state:
+    st.session_state.generated_reviews = []
+
+
+# ─── UI: Step 1 - 상품 검색 ───
+st.subheader("1단계: 상품 검색")
+
+col_search, col_btn = st.columns([4, 1])
+with col_search:
+    query = st.text_input(
+        "상품명을 입력하세요",
+        placeholder="예: 선크림, 토너, 클렌징폼...",
+        key="search_query",
+    )
+with col_btn:
+    st.write("")  # spacing
+    search_clicked = st.button("🔍 검색", use_container_width=True)
+
+if search_clicked and query:
+    with st.spinner("올리브영에서 상품을 검색 중입니다..."):
+        results = search_oliveyoung(query)
+        if results:
+            # 유사도 점수 계산 및 정렬
+            for p in results:
+                p["similarity"] = calculate_similarity(query, p["name"])
+            results.sort(key=lambda x: x["similarity"], reverse=True)
+            st.session_state.search_results = results
+            st.session_state.selected_product = None
+            st.session_state.generated_reviews = []
+        else:
+            st.warning("검색 결과가 없습니다. 다른 키워드로 시도해보세요.")
+
+# ─── UI: 검색 결과 표시 ───
+if st.session_state.search_results:
+    st.divider()
+    st.subheader("2단계: 상품 선택")
+    st.info(f"총 {len(st.session_state.search_results)}개 상품이 검색되었습니다. 리뷰를 가져올 상품을 선택하세요.")
+
+    for i, product in enumerate(st.session_state.search_results):
+        with st.container(border=True):
+            col_img, col_info, col_action = st.columns([1, 3, 1])
+
+            with col_img:
+                st.image(product["image"], width=100)
+
+            with col_info:
+                st.markdown(f"**{product['name'][:80]}**")
+                st.caption(
+                    f"🏷️ {product['brand']}  |  "
+                    f"💰 {product['price']:,}원  |  "
+                    f"⭐ {product['rating']}/10  |  "
+                    f"💬 리뷰 {product['review_count']:,}개  |  "
+                    f"🎯 유사도 {product['similarity']}%"
+                )
+
+            with col_action:
+                st.write("")  # spacing
+                if st.button("선택", key=f"select_{i}", use_container_width=True):
+                    st.session_state.selected_product = product
+                    st.session_state.generated_reviews = []
+
+# ─── UI: Step 3 - 리뷰 입력 ───
+if st.session_state.selected_product:
+    product = st.session_state.selected_product
+    st.divider()
+    st.subheader("3단계: 리뷰 수집")
+
+    with st.container(border=True):
+        st.success(f"선택된 상품: **{product['name'][:80]}**")
+        st.markdown(
+            f"[올리브영에서 리뷰 보기]({PRODUCT_URL}{product['goods_no']})"
+        )
+
+    st.markdown("""
+    #### 리뷰 입력 방법
+    아래 링크에서 올리브영 상품 페이지를 열고, 리뷰 탭에서 **리뷰 텍스트를 복사**하여 아래에 붙여넣어 주세요.
+    - 리뷰 하나당 **한 줄씩** 입력해주세요
+    - 최소 **5개 이상**의 리뷰를 입력하면 더 자연스러운 결과를 얻을 수 있습니다
+    """)
+
+    reviews_text = st.text_area(
+        "리뷰를 붙여넣어 주세요 (한 줄에 리뷰 하나)",
+        height=300,
+        placeholder=(
+            "피부에 잘 맞고 발림성이 좋아요. 향도 은은해서 좋습니다.\n"
+            "촉촉하고 끈적이지 않아서 여름에도 사용하기 좋아요.\n"
+            "재구매 의사 있어요! 가격 대비 효과가 좋습니다.\n"
+            "..."
+        ),
+        key="review_input_area",
     )
 
-    if selected_target:
-        info = df[df['Display'] == selected_target].iloc[0]
-        
-        with st.container(border=True):
-            st.info(f"**{info['ItemName']}**")
-            col1, col2 = st.columns(2)
-            with col1:
-                st.write(f"**브랜드:** {info['Brand']}")
-                st.write(f"**모델:** {info['Commercial']}")
-            with col2:
-                st.success(f"### **구매가: {info['PRICE']}원**")
-            
-            # 담기 전 초기 수량 설정
-            order_qty = st.number_input("추가할 수량", min_value=1, value=1, step=1, key="add_qty_input")
-            
-            btn_col1, btn_col2 = st.columns(2)
-            with btn_col1:
-                q = urllib.parse.quote(info['ItemName'])
-                st.link_button("🚀 네이버 최저가 확인", f"https://search.shopping.naver.com/search/all?query={q}", use_container_width=True)
-            with btn_col2:
-                if st.button("🛒 주문 목록에 담기", use_container_width=True):
-                    if selected_target in st.session_state.cart:
-                        st.session_state.cart[selected_target] += order_qty
-                    else:
-                        st.session_state.cart[selected_target] = order_qty
-                    st.toast(f"목록에 {order_qty}개 추가되었습니다!")
+    # ─── UI: Step 4 - 리뷰 생성 ───
+    if reviews_text.strip():
+        reviews_list = [
+            line.strip()
+            for line in reviews_text.strip().split("\n")
+            if len(line.strip()) > 5
+        ]
 
-    st.markdown("---")
+        st.divider()
+        st.subheader("4단계: 리뷰 생성")
 
-    # --- [하단] 4. 내 주문 목록 (수량 직접 수정 기능) ---
-    st.subheader("📦 2. 내 주문 목록 (수량 수정 가능)")
-    
-    if st.session_state.cart:
-        total_p = 0
-        
-        # 목록을 돌면서 수량 수정 UI 배치
-        for item_id, current_qty in list(st.session_state.cart.items()):
-            item_info = df[df['Display'] == item_id].iloc[0]
-            
-            with st.container(border=False):
-                col_name, col_qty, col_del = st.columns([3, 1.5, 0.5])
-                
-                # 1. 상품명 표시
-                col_name.write(f"**{item_info['ItemName']}**\n({item_info['PRICE']}원)")
-                
-                # 2. 수량 직접 수정 (변경 즉시 세션 업데이트)
-                new_qty = col_qty.number_input(
-                    "수량", 
-                    min_value=1, 
-                    value=current_qty, 
-                    key=f"edit_{item_id}", 
-                    label_visibility="collapsed"
+        col_count, col_gen = st.columns([2, 2])
+        with col_count:
+            review_count = st.slider("생성할 리뷰 수", 1, 10, 3)
+        with col_gen:
+            st.write("")  # spacing
+            generate_clicked = st.button(
+                "✨ 리뷰 생성하기", use_container_width=True, type="primary"
+            )
+
+        if generate_clicked:
+            if len(reviews_list) < 3:
+                st.warning("최소 3개 이상의 리뷰를 입력해주세요.")
+            else:
+                with st.spinner("리뷰를 조합하여 새로운 리뷰를 생성 중..."):
+                    generated = generate_reviews(reviews_list, review_count)
+                    st.session_state.generated_reviews = generated
+
+        # ─── 생성된 리뷰 출력 ───
+        if st.session_state.generated_reviews:
+            st.divider()
+            st.subheader("생성된 리뷰")
+
+            for i, review in enumerate(st.session_state.generated_reviews):
+                with st.container(border=True):
+                    st.markdown(f"**리뷰 #{i + 1}**")
+                    st.write(review)
+
+            # 키워드 분석
+            st.divider()
+            st.subheader("리뷰 키워드 분석")
+            keywords = extract_keywords(reviews_list)
+            if keywords:
+                keyword_str = "  ".join(
+                    [f"`{word}` ({count})" for word, count in keywords]
                 )
-                if new_qty != current_qty:
-                    st.session_state.cart[item_id] = new_qty
-                    st.rerun() # 수량 변경 시 즉시 합계 재계산
-                
-                # 3. 삭제 버튼
-                if col_del.button("❌", key=f"del_{item_id}"):
-                    del st.session_state.cart[item_id]
-                    st.rerun()
-                
-                # 소계 계산 및 표시
-                subtotal = item_info['PRICE_NUM'] * st.session_state.cart[item_id]
-                total_p += subtotal
-                st.write(f"소계: **{subtotal:,.0f}원**")
-                st.divider()
+                st.markdown(keyword_str)
 
-        st.warning(f"### **최종 합계 금액: {total_p:,.0f}원**")
-        
-        c1, c2 = st.columns(2)
-        if c1.button("🗑️ 전체 비우기", use_container_width=True):
-            st.session_state.cart = {}
-            st.session_state.order_mode = False
-            st.rerun()
-            
-        if c2.button("📝 주문서 작성하기", use_container_width=True):
-            st.session_state.order_mode = True
-
-        # 5. 주문 정보 입력 양식
-        if st.session_state.order_mode:
-            st.markdown("---")
-            with st.form("final_order_form"):
-                name = st.text_input("주문자 성함")
-                addr = st.text_area("배송지 주소")
-                phone = st.text_input("연락처")
-                
-                if st.form_submit_button("최종 주문 완료", use_container_width=True):
-                    if name and addr and phone:
-                        sheet = get_google_sheet()
-                        if sheet:
-                            now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                            
-                            summary = []
-                            for d, q in st.session_state.cart.items():
-                                itm = df[df['Display'] == d].iloc[0]['ItemName']
-                                summary.append(f"{itm}({q}개)")
-                            items_summary = ", ".join(summary)
-                            
-                            sheet.append_row([now, name, phone, addr, items_summary, f"{total_p:,.0f}원"])
-                            st.balloons()
-                            st.success("✅ 주문이 완료되었습니다!")
-                            st.session_state.cart = {}
-                            st.session_state.order_mode = False
-                    else:
-                        st.error("배송 정보를 모두 입력해 주세요.")
-    else:
-        st.info("주문 목록에 담긴 상품이 없습니다.")
-
-except Exception as e:
-    st.error(f"애플리케이션 오류: {e}")
+            # 재생성 버튼
+            if st.button("🔄 다시 생성하기"):
+                generated = generate_reviews(
+                    reviews_list, len(st.session_state.generated_reviews)
+                )
+                st.session_state.generated_reviews = generated
+                st.rerun()
