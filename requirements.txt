@@ -1,2 +1,2 @@
 streamlit
-cloudscraper
+curl_cffi

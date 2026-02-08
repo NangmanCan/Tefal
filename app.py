@@ -1,5 +1,5 @@
 import streamlit as st
-import cloudscraper
+from curl_cffi import requests as cffi_requests
 import random
 import re
 import json
@@ -12,18 +12,7 @@ st.caption("올리브영 상품 URL을 입력하면 리뷰를 자동 수집하�
 
 # ─── Constants ───
 REVIEW_API = "https://m.oliveyoung.co.kr/review/api/v2/reviews"
-
-BROWSER_CONFIGS = [
-    {"browser": "firefox", "platform": "windows", "desktop": True},
-    {"browser": "firefox", "platform": "linux", "desktop": True},
-    {"browser": "firefox", "platform": "darwin", "desktop": True},
-]
-
-
-# ─── HTTP Client ───
-def create_scraper():
-    config = random.choice(BROWSER_CONFIGS)
-    return cloudscraper.create_scraper(browser=config)
+IMPERSONATE_BROWSERS = ["chrome120", "chrome124", "safari17_0"]
 
 
 # ─── API Functions ───
@@ -48,22 +37,23 @@ def fetch_reviews(goods_number, pages=3, size=10, max_retries=3):
 
     for attempt in range(max_retries):
         all_reviews = []
-        scraper = create_scraper()
+        browser = IMPERSONATE_BROWSERS[attempt % len(IMPERSONATE_BROWSERS)]
         success = False
 
         for page in range(1, pages + 1):
             try:
-                resp = scraper.post(
+                resp = cffi_requests.post(
                     REVIEW_API,
                     json={"goodsNumber": goods_number, "page": page, "size": size},
                     headers={
                         "Accept": "application/json",
                         "Content-Type": "application/json",
                     },
+                    impersonate=browser,
                     timeout=15,
                 )
                 if resp.status_code == 403:
-                    st.warning(f"Cloudflare 차단 감지, 재시도 중... ({attempt + 1}/{max_retries})")
+                    st.warning(f"차단 감지, 브라우저 변경 후 재시도 중... ({attempt + 1}/{max_retries})")
                     break
                 if resp.status_code != 200:
                     st.warning(f"API 응답 오류: {resp.status_code}")
