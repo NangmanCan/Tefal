@@ -17,53 +17,80 @@ PRODUCT_URL = "https://www.oliveyoung.co.kr/store/goods/getGoodsDetail.do?goodsN
 
 
 # ─── HTTP Client ───
-@st.cache_resource
-def get_scraper():
-    return cloudscraper.create_scraper()
+BROWSER_CONFIGS = [
+    {"browser": {"browser": "chrome", "platform": "windows", "desktop": True}},
+    {"browser": {"browser": "chrome", "platform": "linux", "desktop": True}},
+    {"browser": {"browser": "firefox", "platform": "windows", "desktop": True}},
+    {"browser": {"browser": "chrome", "platform": "darwin", "desktop": True}},
+]
+
+
+def create_scraper():
+    """매 요청마다 새로운 scraper 생성"""
+    config = random.choice(BROWSER_CONFIGS)
+    return cloudscraper.create_scraper(**config)
 
 
 # ─── API Functions ───
-def search_oliveyoung(query, count=20):
-    """올리브영 검색 API 호출"""
-    try:
-        scraper = get_scraper()
-        resp = scraper.post(
-            SEARCH_API,
-            data={
-                "query": query,
-                "listnum": count,
-                "startCount": 0,
-                "sort": "",
-                "displayMediaTypes": "02",
-            },
-            headers={
-                "Accept": "application/json",
-                "X-Requested-With": "XMLHttpRequest",
-                "Referer": "https://www.oliveyoung.co.kr/store/search/getSearchMain.do",
-            },
-            timeout=15,
-        )
-        resp.raise_for_status()
-        data = resp.json()
-        products = []
-        for collection in data.get("Data", []):
-            if collection.get("CollName") == "OLIVE_GOODS":
-                for item in collection.get("Result", []):
-                    products.append({
-                        "goods_no": item.get("GOODS_NO", ""),
-                        "name": item.get("GOODS_NM", ""),
-                        "brand": item.get("ONL_BRND_NM", ""),
-                        "price": item.get("SALE_PRC", 0),
-                        "original_price": item.get("NORM_PRC", 0),
-                        "rating": item.get("GOODS_EVAL_SCR_VAL", 0),
-                        "review_count": item.get("PRMUM_GDAS_TOT_CNT", 0),
-                        "image": IMG_BASE + item.get("IMG_PATH_NM", ""),
-                        "category": item.get("MID_CAT_NM", ""),
-                    })
-        return products
-    except Exception as e:
-        st.error(f"검색 오류: {e}")
-        return []
+def search_oliveyoung(query, count=20, max_retries=3):
+    """올리브영 검색 API 호출 (재시도 포함)"""
+    last_error = None
+
+    for attempt in range(max_retries):
+        try:
+            scraper = create_scraper()
+
+            # 먼저 메인 페이지 방문하여 쿠키 획득
+            scraper.get(
+                "https://www.oliveyoung.co.kr/store/search/getSearchMain.do",
+                params={"query": query},
+                timeout=15,
+            )
+
+            # 검색 API 호출
+            resp = scraper.post(
+                SEARCH_API,
+                data={
+                    "query": query,
+                    "listnum": count,
+                    "startCount": 0,
+                    "sort": "",
+                    "displayMediaTypes": "02",
+                },
+                headers={
+                    "Accept": "application/json",
+                    "X-Requested-With": "XMLHttpRequest",
+                    "Referer": "https://www.oliveyoung.co.kr/store/search/getSearchMain.do",
+                },
+                timeout=15,
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            products = []
+            for collection in data.get("Data", []):
+                if collection.get("CollName") == "OLIVE_GOODS":
+                    for item in collection.get("Result", []):
+                        products.append({
+                            "goods_no": item.get("GOODS_NO", ""),
+                            "name": item.get("GOODS_NM", ""),
+                            "brand": item.get("ONL_BRND_NM", ""),
+                            "price": item.get("SALE_PRC", 0),
+                            "original_price": item.get("NORM_PRC", 0),
+                            "rating": item.get("GOODS_EVAL_SCR_VAL", 0),
+                            "review_count": item.get("PRMUM_GDAS_TOT_CNT", 0),
+                            "image": IMG_BASE + item.get("IMG_PATH_NM", ""),
+                            "category": item.get("MID_CAT_NM", ""),
+                        })
+            return products
+        except Exception as e:
+            last_error = e
+            import time
+            if attempt < max_retries - 1:
+                time.sleep(2 ** attempt)  # 1초, 2초 대기 후 재시도
+            continue
+
+    st.error(f"검색 오류 ({max_retries}회 시도 실패): {last_error}")
+    return []
 
 
 def calculate_similarity(query, product_name):
