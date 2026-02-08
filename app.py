@@ -1,11 +1,75 @@
 import streamlit as st
+import cloudscraper
 import random
 import re
+import json
 from collections import Counter
 
 st.set_page_config(page_title="올리브영 리뷰 생성기", layout="wide")
 st.title("🧴 올리브영 리뷰 생성기")
-st.caption("올리브영 상품 리뷰를 조합하여 새로운 리뷰를 만들어드립니다.")
+st.caption("올리브영 상품 URL을 입력하면 리뷰를 자동 수집하여 새로운 리뷰를 생성합니다.")
+
+# ─── Constants ───
+REVIEW_API = "https://m.oliveyoung.co.kr/review/api/v2/reviews"
+
+
+# ─── HTTP Client ───
+def create_scraper():
+    return cloudscraper.create_scraper(
+        browser={"browser": "firefox", "platform": "windows", "desktop": True}
+    )
+
+
+# ─── API Functions ───
+def extract_goods_number(url_or_text):
+    """URL 또는 텍스트에서 상품번호 추출"""
+    patterns = [
+        r"goodsNo=([A-Z0-9]+)",
+        r"goods/([A-Z]\d{12,})",
+        r"([A-Z]\d{12,})",
+    ]
+    for pat in patterns:
+        match = re.search(pat, url_or_text)
+        if match:
+            return match.group(1)
+    return None
+
+
+def fetch_reviews(goods_number, pages=3, size=10):
+    """올리브영 리뷰 API에서 리뷰 자동 수집"""
+    all_reviews = []
+    scraper = create_scraper()
+
+    for page in range(1, pages + 1):
+        try:
+            resp = scraper.post(
+                REVIEW_API,
+                json={"goodsNumber": goods_number, "page": page, "size": size},
+                headers={
+                    "Accept": "application/json",
+                    "Content-Type": "application/json",
+                },
+                timeout=15,
+            )
+            if resp.status_code != 200:
+                break
+            data = resp.json()
+            reviews = data.get("data", [])
+            if not reviews:
+                break
+            for r in reviews:
+                content = r.get("content", "").strip()
+                if content:
+                    all_reviews.append({
+                        "content": content,
+                        "score": r.get("reviewScore", 0),
+                        "nickname": r.get("profileDto", {}).get("memberNickname", ""),
+                        "date": r.get("createdDateTime", ""),
+                    })
+        except Exception:
+            break
+
+    return all_reviews
 
 
 # ─── Review Generation ───
@@ -18,12 +82,12 @@ def split_sentences(text):
 def categorize_sentences(sentences):
     """문장을 카테고리별로 분류"""
     categories = {
-        "purchase": [],   # 구매/배송 관련
-        "texture": [],    # 발림성/텍스처
-        "effect": [],     # 효과/결과
-        "scent": [],      # 향/냄새
-        "general": [],    # 일반 사용감
-        "recommend": [],  # 추천/재구매
+        "purchase": [],
+        "texture": [],
+        "effect": [],
+        "scent": [],
+        "general": [],
+        "recommend": [],
     }
 
     rules = {
@@ -57,35 +121,28 @@ def generate_reviews(reviews_text, count=3):
         return ["리뷰 데이터가 부족합니다. 더 많은 리뷰를 입력해주세요."]
 
     categories = categorize_sentences(all_sentences)
-
     generated = []
     category_order = ["purchase", "texture", "effect", "scent", "general", "recommend"]
 
     for _ in range(count):
         parts = []
 
-        # 각 카테고리에서 랜덤으로 문장 선택
         for cat in category_order:
             cat_sents = categories[cat]
-            if cat_sents and random.random() > 0.3:  # 70% 확률로 카테고리 포함
+            if cat_sents and random.random() > 0.3:
                 sent = random.choice(cat_sents)
                 if sent not in parts:
                     parts.append(sent)
 
-        # 최소 3문장 보장
         while len(parts) < 3:
             sent = random.choice(all_sentences)
             if sent not in parts:
                 parts.append(sent)
 
-        # 최대 6문장으로 제한
         if len(parts) > 6:
             parts = parts[:6]
 
-        # 문장 연결
         review_text = " ".join(parts)
-
-        # 마지막 문장 부호 정리
         review_text = review_text.rstrip()
         if review_text and review_text[-1] not in ".!?~":
             review_text += "."
@@ -113,57 +170,58 @@ def extract_keywords(reviews_text, top_n=15):
 
 
 # ─── Session State ───
+if "fetched_reviews" not in st.session_state:
+    st.session_state.fetched_reviews = []
 if "generated_reviews" not in st.session_state:
     st.session_state.generated_reviews = []
+if "goods_number" not in st.session_state:
+    st.session_state.goods_number = None
 
 
-# ─── UI: Step 1 - 상품 정보 입력 ───
-st.subheader("1단계: 상품 정보")
-
-product_name = st.text_input(
-    "상품명 (참고용)",
-    placeholder="예: 아누아 어성초 토너",
-)
+# ─── UI: Step 1 - URL 입력 ───
+st.subheader("1단계: 올리브영 상품 URL 입력")
 
 product_url = st.text_input(
-    "올리브영 상품 URL (선택사항)",
-    placeholder="https://www.oliveyoung.co.kr/store/goods/getGoodsDetail.do?goodsNo=...",
+    "상품 URL을 붙여넣어 주세요",
+    placeholder="https://www.oliveyoung.co.kr/store/goods/getGoodsDetail.do?goodsNo=A000000243621",
 )
 
-if product_url:
-    st.markdown(f"[올리브영에서 리뷰 보기]({product_url})")
+col_pages, col_btn = st.columns([2, 2])
+with col_pages:
+    max_pages = st.slider("수집할 리뷰 페이지 수", 1, 10, 3, help="페이지당 10개 리뷰")
+with col_btn:
+    st.write("")
+    fetch_clicked = st.button("📥 리뷰 자동 수집", use_container_width=True, type="primary")
 
-# ─── UI: Step 2 - 리뷰 입력 ───
-st.divider()
-st.subheader("2단계: 리뷰 입력")
+if fetch_clicked and product_url:
+    goods_number = extract_goods_number(product_url)
+    if not goods_number:
+        st.error("올리브영 상품 URL에서 상품번호를 찾을 수 없습니다.")
+    else:
+        st.session_state.goods_number = goods_number
+        with st.spinner(f"상품 {goods_number}의 리뷰를 수집 중..."):
+            reviews = fetch_reviews(goods_number, pages=max_pages)
+            if reviews:
+                st.session_state.fetched_reviews = reviews
+                st.session_state.generated_reviews = []
+                st.success(f"총 {len(reviews)}개 리뷰를 수집했습니다!")
+            else:
+                st.warning("리뷰를 가져올 수 없습니다. URL을 확인해주세요.")
 
-st.markdown("""
-올리브영 상품 페이지에서 **리뷰 텍스트를 복사**하여 아래에 붙여넣어 주세요.
-- 리뷰 하나당 **한 줄씩** 입력
-- 최소 **5개 이상** 입력하면 더 자연스러운 결과
-""")
-
-reviews_text = st.text_area(
-    "리뷰를 붙여넣어 주세요 (한 줄에 리뷰 하나)",
-    height=300,
-    placeholder=(
-        "피부에 잘 맞고 발림성이 좋아요. 향도 은은해서 좋습니다.\n"
-        "촉촉하고 끈적이지 않아서 여름에도 사용하기 좋아요.\n"
-        "재구매 의사 있어요! 가격 대비 효과가 좋습니다.\n"
-        "..."
-    ),
-)
-
-# ─── UI: Step 3 - 리뷰 생성 ───
-if reviews_text.strip():
-    reviews_list = [
-        line.strip()
-        for line in reviews_text.strip().split("\n")
-        if len(line.strip()) > 5
-    ]
-
+# ─── UI: Step 2 - 수집된 리뷰 확인 ───
+if st.session_state.fetched_reviews:
     st.divider()
-    st.subheader("3단계: 리뷰 생성")
+    st.subheader(f"2단계: 수집된 리뷰 ({len(st.session_state.fetched_reviews)}개)")
+
+    with st.expander("수집된 리뷰 보기", expanded=False):
+        for i, r in enumerate(st.session_state.fetched_reviews):
+            score_stars = "⭐" * r["score"]
+            st.markdown(f"**{i+1}.** {score_stars} _{r['nickname']}_ ({r['date']})")
+            st.caption(r["content"][:200])
+
+    # ─── UI: Step 3 - 리뷰 생성 ───
+    st.divider()
+    st.subheader("3단계: 새 리뷰 생성")
 
     col_count, col_gen = st.columns([2, 2])
     with col_count:
@@ -171,15 +229,16 @@ if reviews_text.strip():
     with col_gen:
         st.write("")
         generate_clicked = st.button(
-            "✨ 리뷰 생성하기", use_container_width=True, type="primary"
+            "✨ 리뷰 생성하기", use_container_width=True
         )
 
     if generate_clicked:
-        if len(reviews_list) < 3:
-            st.warning("최소 3개 이상의 리뷰를 입력해주세요.")
+        contents = [r["content"] for r in st.session_state.fetched_reviews]
+        if len(contents) < 3:
+            st.warning("수집된 리뷰가 부족합니다. 더 많은 페이지를 수집해주세요.")
         else:
             with st.spinner("리뷰를 조합하여 새로운 리뷰를 생성 중..."):
-                generated = generate_reviews(reviews_list, review_count)
+                generated = generate_reviews(contents, review_count)
                 st.session_state.generated_reviews = generated
 
     # ─── 생성된 리뷰 출력 ───
@@ -195,7 +254,8 @@ if reviews_text.strip():
         # 키워드 분석
         st.divider()
         st.subheader("📊 리뷰 키워드 분석")
-        keywords = extract_keywords(reviews_list)
+        contents = [r["content"] for r in st.session_state.fetched_reviews]
+        keywords = extract_keywords(contents)
         if keywords:
             keyword_str = "  ".join(
                 [f"`{word}` ({count})" for word, count in keywords]
@@ -204,8 +264,9 @@ if reviews_text.strip():
 
         # 재생성 버튼
         if st.button("🔄 다시 생성하기"):
+            contents = [r["content"] for r in st.session_state.fetched_reviews]
             generated = generate_reviews(
-                reviews_list, len(st.session_state.generated_reviews)
+                contents, len(st.session_state.generated_reviews)
             )
             st.session_state.generated_reviews = generated
             st.rerun()
