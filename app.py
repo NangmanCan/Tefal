@@ -3,6 +3,7 @@ import cloudscraper
 import random
 import re
 import json
+import time
 from collections import Counter
 
 st.set_page_config(page_title="올리브영 리뷰 생성기", layout="wide")
@@ -12,12 +13,17 @@ st.caption("올리브영 상품 URL을 입력하면 리뷰를 자동 수집하�
 # ─── Constants ───
 REVIEW_API = "https://m.oliveyoung.co.kr/review/api/v2/reviews"
 
+BROWSER_CONFIGS = [
+    {"browser": "firefox", "platform": "windows", "desktop": True},
+    {"browser": "firefox", "platform": "linux", "desktop": True},
+    {"browser": "firefox", "platform": "darwin", "desktop": True},
+]
+
 
 # ─── HTTP Client ───
 def create_scraper():
-    return cloudscraper.create_scraper(
-        browser={"browser": "firefox", "platform": "windows", "desktop": True}
-    )
+    config = random.choice(BROWSER_CONFIGS)
+    return cloudscraper.create_scraper(browser=config)
 
 
 # ─── API Functions ───
@@ -25,7 +31,8 @@ def extract_goods_number(url_or_text):
     """URL 또는 텍스트에서 상품번호 추출"""
     patterns = [
         r"goodsNo=([A-Z0-9]+)",
-        r"goods/([A-Z]\d{12,})",
+        r"goodsNumber=([A-Z0-9]+)",
+        r"/goods/([A-Z]\d{12,})",
         r"([A-Z]\d{12,})",
     ]
     for pat in patterns:
@@ -35,39 +42,61 @@ def extract_goods_number(url_or_text):
     return None
 
 
-def fetch_reviews(goods_number, pages=3, size=10):
-    """올리브영 리뷰 API에서 리뷰 자동 수집"""
+def fetch_reviews(goods_number, pages=3, size=10, max_retries=3):
+    """올리브영 리뷰 API에서 리뷰 자동 수집 (재시도 포함)"""
     all_reviews = []
-    scraper = create_scraper()
 
-    for page in range(1, pages + 1):
-        try:
-            resp = scraper.post(
-                REVIEW_API,
-                json={"goodsNumber": goods_number, "page": page, "size": size},
-                headers={
-                    "Accept": "application/json",
-                    "Content-Type": "application/json",
-                },
-                timeout=15,
-            )
-            if resp.status_code != 200:
+    for attempt in range(max_retries):
+        all_reviews = []
+        scraper = create_scraper()
+        success = False
+
+        for page in range(1, pages + 1):
+            try:
+                resp = scraper.post(
+                    REVIEW_API,
+                    json={"goodsNumber": goods_number, "page": page, "size": size},
+                    headers={
+                        "Accept": "application/json",
+                        "Content-Type": "application/json",
+                    },
+                    timeout=15,
+                )
+                if resp.status_code == 403:
+                    st.warning(f"Cloudflare 차단 감지, 재시도 중... ({attempt + 1}/{max_retries})")
+                    break
+                if resp.status_code != 200:
+                    st.warning(f"API 응답 오류: {resp.status_code}")
+                    break
+
+                data = resp.json()
+                api_status = data.get("status", "")
+                if api_status != "SUCCESS":
+                    st.warning(f"API 상태: {api_status} - {data.get('message', '')}")
+                    break
+
+                reviews = data.get("data") or []
+                if not reviews:
+                    break
+                for r in reviews:
+                    content = r.get("content", "").strip()
+                    if content:
+                        all_reviews.append({
+                            "content": content,
+                            "score": r.get("reviewScore", 0),
+                            "nickname": r.get("profileDto", {}).get("memberNickname", ""),
+                            "date": r.get("createdDateTime", ""),
+                        })
+                success = True
+            except Exception as e:
+                st.warning(f"요청 오류: {e}")
                 break
-            data = resp.json()
-            reviews = data.get("data", [])
-            if not reviews:
-                break
-            for r in reviews:
-                content = r.get("content", "").strip()
-                if content:
-                    all_reviews.append({
-                        "content": content,
-                        "score": r.get("reviewScore", 0),
-                        "nickname": r.get("profileDto", {}).get("memberNickname", ""),
-                        "date": r.get("createdDateTime", ""),
-                    })
-        except Exception:
-            break
+
+        if success and all_reviews:
+            return all_reviews
+
+        if attempt < max_retries - 1:
+            time.sleep(2 ** attempt)
 
     return all_reviews
 
