@@ -18,21 +18,24 @@ PRODUCT_URL = "https://www.oliveyoung.co.kr/store/goods/getGoodsDetail.do?goodsN
 
 # ─── HTTP Client ───
 BROWSER_CONFIGS = [
-    {"browser": {"browser": "chrome", "platform": "windows", "desktop": True}},
-    {"browser": {"browser": "chrome", "platform": "linux", "desktop": True}},
     {"browser": {"browser": "firefox", "platform": "windows", "desktop": True}},
-    {"browser": {"browser": "chrome", "platform": "darwin", "desktop": True}},
+    {"browser": {"browser": "firefox", "platform": "linux", "desktop": True}},
+    {"browser": {"browser": "firefox", "platform": "darwin", "desktop": True}},
 ]
 
 
 def create_scraper():
-    """매 요청마다 새로운 scraper 생성"""
+    """매 요청마다 새로운 scraper 생성 (Firefox UA만 사용)"""
     config = random.choice(BROWSER_CONFIGS)
-    return cloudscraper.create_scraper(**config)
+    scraper = cloudscraper.create_scraper(**config)
+    scraper.headers.update({
+        "Accept-Language": "ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7",
+    })
+    return scraper
 
 
 # ─── API Functions ───
-def search_oliveyoung(query, count=20, max_retries=3):
+def search_oliveyoung(query, count=20, max_retries=4):
     """올리브영 검색 API 호출 (재시도 포함)"""
     last_error = None
 
@@ -40,10 +43,9 @@ def search_oliveyoung(query, count=20, max_retries=3):
         try:
             scraper = create_scraper()
 
-            # 먼저 메인 페이지 방문하여 쿠키 획득
-            scraper.get(
-                "https://www.oliveyoung.co.kr/store/search/getSearchMain.do",
-                params={"query": query},
+            # 먼저 메인 페이지 방문하여 Cloudflare 쿠키 획득
+            main_resp = scraper.get(
+                "https://www.oliveyoung.co.kr/store/main/main.do",
                 timeout=15,
             )
 
@@ -85,8 +87,9 @@ def search_oliveyoung(query, count=20, max_retries=3):
         except Exception as e:
             last_error = e
             import time
+            wait = 2 ** attempt
             if attempt < max_retries - 1:
-                time.sleep(2 ** attempt)  # 1초, 2초 대기 후 재시도
+                time.sleep(wait)
             continue
 
     st.error(f"검색 오류 ({max_retries}회 시도 실패): {last_error}")
