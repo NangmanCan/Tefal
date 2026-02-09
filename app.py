@@ -1,18 +1,20 @@
 import streamlit as st
 from curl_cffi import requests as cffi_requests
-import random
 import re
 import json
 import time
+import urllib.request
 from collections import Counter
 
 st.set_page_config(page_title="올리브영 리뷰 생성기", layout="wide")
 st.title("🧴 올리브영 리뷰 생성기")
-st.caption("올리브영 상품 URL을 입력하면 리뷰를 자동 수집하여 새로운 리뷰를 생성합니다.")
+st.caption("올리브영 상품 URL을 입력하면 리뷰를 자동 수집하여 Gemini AI로 새로운 리뷰를 생성합니다.")
 
 # ─── Constants ───
 REVIEW_API = "https://m.oliveyoung.co.kr/review/api/v2/reviews"
 IMPERSONATE_BROWSERS = ["chrome120", "chrome124", "safari17_0"]
+GEMINI_API_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent"
+GEMINI_API_KEY = "AIzaSyAHlHAWdekllJEEwITQ5xJnzdhLDeqjg8w"
 
 
 # ─── API Functions ───
@@ -78,84 +80,83 @@ def fetch_reviews(goods_number, count=10, max_retries=3):
     return []
 
 
-# ─── Review Generation ───
-def split_sentences(text):
-    """텍스트를 문장 단위로 분리"""
-    sentences = re.split(r"(?<=[.!?~])\s+|(?<=다)\s+|(?<=요)\s+|(?<=음)\s+|\n+", text)
-    return [s.strip() for s in sentences if len(s.strip()) > 5]
+# ─── Gemini AI Review Generation ───
+def call_gemini(prompt, max_retries=3):
+    """Gemini API REST 호출 (429 자동 재시도 포함)"""
+    url = f"{GEMINI_API_URL}?key={GEMINI_API_KEY}"
+    payload = json.dumps({
+        "contents": [{"parts": [{"text": prompt}]}],
+        "generationConfig": {
+            "temperature": 0.9,
+            "maxOutputTokens": 2048,
+        },
+    }).encode("utf-8")
+
+    for attempt in range(max_retries):
+        req = urllib.request.Request(
+            url,
+            data=payload,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=30) as resp:
+                data = json.loads(resp.read().decode("utf-8"))
+                return data["candidates"][0]["content"]["parts"][0]["text"]
+        except urllib.error.HTTPError as e:
+            error_body = e.read().decode("utf-8", errors="ignore")
+            if e.code == 429 and attempt < max_retries - 1:
+                wait = 2 ** (attempt + 1)
+                st.info(f"API 할당량 제한, {wait}초 후 재시도... ({attempt + 1}/{max_retries})")
+                time.sleep(wait)
+                continue
+            raise Exception(f"Gemini API 오류 ({e.code}): {error_body[:300]}")
+        except Exception as e:
+            raise Exception(f"Gemini 요청 실패: {e}")
 
 
-def categorize_sentences(sentences):
-    """문장을 카테고리별로 분류"""
-    categories = {
-        "purchase": [],
-        "texture": [],
-        "effect": [],
-        "scent": [],
-        "general": [],
-        "recommend": [],
-    }
+def generate_reviews_with_gemini(reviews_text, count=3, sentiment="positive"):
+    """Gemini AI를 사용하여 리뷰 생성"""
+    if len(reviews_text) < 1:
+        return ["리뷰 데이터가 부족합니다."]
 
-    rules = {
-        "purchase": ["구매", "주문", "배송", "샀", "사서", "받았", "도착", "배달", "구입", "재구매"],
-        "texture": ["발림", "텍스처", "질감", "흡수", "끈적", "촉촉", "가벼", "무거", "밀림", "들뜸", "커버", "밀착"],
-        "effect": ["효과", "피부", "보습", "건조", "좋아", "개선", "밝아", "탄력", "윤기", "촉촉", "수분", "진정", "트러블"],
-        "scent": ["향", "냄새", "무향", "향기"],
-        "recommend": ["추천", "재구매", "만족", "최고", "좋습니다", "강추", "대박", "최애", "존좋", "갓", "인생"],
-    }
+    reviews_sample = "\n".join([f"- {r}" for r in reviews_text[:15]])
 
-    for sent in sentences:
-        matched = False
-        for cat, keywords in rules.items():
-            if any(k in sent for k in keywords):
-                categories[cat].append(sent)
-                matched = True
-                break
-        if not matched:
-            categories["general"].append(sent)
+    if sentiment == "positive":
+        tone_desc = "긍정적이고 만족스러운 톤 (5점 리뷰)"
+        instruction = "상품에 대해 만족하는 실제 구매자처럼 자연스러운 긍정 리뷰를 작성하세요."
+    else:
+        tone_desc = "부정적이고 불만족스러운 톤 (1점 리뷰)"
+        instruction = "상품에 대해 불만족한 실제 구매자처럼 자연스러운 부정 리뷰를 작성하세요."
 
-    return categories
+    prompt = f"""아래는 올리브영 화장품 상품의 실제 리뷰입니다.
 
+[기존 리뷰]
+{reviews_sample}
 
-def generate_reviews(reviews_text, count=3):
-    """기존 리뷰 텍스트에서 새로운 리뷰를 생성"""
-    all_sentences = []
-    for review in reviews_text:
-        all_sentences.extend(split_sentences(review))
+[요청]
+위 리뷰들의 말투, 표현 방식, 언급하는 포인트를 참고하여 {tone_desc}의 새로운 리뷰 {count}개를 생성해주세요.
 
-    if len(all_sentences) < 3:
-        return ["리뷰 데이터가 부족합니다. 더 많은 리뷰를 입력해주세요."]
+{instruction}
 
-    categories = categorize_sentences(all_sentences)
-    generated = []
-    category_order = ["purchase", "texture", "effect", "scent", "general", "recommend"]
+규칙:
+- 각 리뷰는 2~4문장, 자연스러운 한국어 구어체로 작성
+- 실제 올리브영 리뷰처럼 보이도록 작성 (이모티콘 가끔 사용 가능)
+- 기존 리뷰를 그대로 복사하지 말고 새롭게 작성
+- 각 리뷰를 번호로 구분 (1. 2. 3. ...)
+- 번호와 리뷰 내용만 출력하고 다른 설명은 하지 마세요"""
 
-    for _ in range(count):
-        parts = []
-
-        for cat in category_order:
-            cat_sents = categories[cat]
-            if cat_sents and random.random() > 0.3:
-                sent = random.choice(cat_sents)
-                if sent not in parts:
-                    parts.append(sent)
-
-        while len(parts) < 3:
-            sent = random.choice(all_sentences)
-            if sent not in parts:
-                parts.append(sent)
-
-        if len(parts) > 6:
-            parts = parts[:6]
-
-        review_text = " ".join(parts)
-        review_text = review_text.rstrip()
-        if review_text and review_text[-1] not in ".!?~":
-            review_text += "."
-
-        generated.append(review_text)
-
-    return generated
+    try:
+        result = call_gemini(prompt)
+        reviews = []
+        for line in result.strip().split("\n"):
+            line = line.strip()
+            cleaned = re.sub(r"^\d+[\.\)]\s*", "", line).strip()
+            if cleaned and len(cleaned) > 10:
+                reviews.append(cleaned)
+        return reviews[:count] if reviews else ["리뷰 생성 결과를 파싱하지 못했습니다."]
+    except Exception as e:
+        return [f"Gemini API 오류: {e}"]
 
 
 def extract_keywords(reviews_text, top_n=15):
@@ -182,7 +183,6 @@ if "generated_positive" not in st.session_state:
     st.session_state.generated_positive = []
 if "generated_negative" not in st.session_state:
     st.session_state.generated_negative = []
-
 
 # ─── UI: Step 1 - URL 입력 ───
 st.subheader("1단계: 올리브영 상품 URL 입력")
@@ -262,7 +262,7 @@ if st.session_state.fetched_reviews:
 
     # ─── UI: Step 3 - 리뷰 생성 (5점/1점 각각) ───
     st.divider()
-    st.subheader("3단계: 새 리뷰 생성")
+    st.subheader("3단계: AI 리뷰 생성")
 
     col_count, col_gen = st.columns([2, 2])
     with col_count:
@@ -270,7 +270,7 @@ if st.session_state.fetched_reviews:
     with col_gen:
         st.write("")
         generate_clicked = st.button(
-            "✨ 리뷰 생성하기", use_container_width=True, type="primary"
+            "✨ Gemini AI 리뷰 생성", use_container_width=True, type="primary"
         )
 
     if generate_clicked:
@@ -280,13 +280,15 @@ if st.session_state.fetched_reviews:
         gen_pos = []
         gen_neg = []
 
-        if len(pos_contents) >= 3:
-            gen_pos = generate_reviews(pos_contents, review_count)
-        if len(neg_contents) >= 3:
-            gen_neg = generate_reviews(neg_contents, review_count)
+        if pos_contents:
+            with st.spinner("Gemini AI로 긍정 리뷰 생성 중..."):
+                gen_pos = generate_reviews_with_gemini(pos_contents, review_count, "positive")
+        if neg_contents:
+            with st.spinner("Gemini AI로 부정 리뷰 생성 중..."):
+                gen_neg = generate_reviews_with_gemini(neg_contents, review_count, "negative")
 
         if not gen_pos and not gen_neg:
-            st.warning("5점 또는 1점 리뷰가 각각 3개 이상 필요합니다. 페이지 수를 늘려서 다시 수집해주세요.")
+            st.warning("5점 또는 1점 리뷰가 최소 1개 이상 필요합니다.")
         else:
             st.session_state.generated_positive = gen_pos
             st.session_state.generated_negative = gen_neg
@@ -349,8 +351,12 @@ if st.session_state.fetched_reviews:
         if st.button("🔄 다시 생성하기"):
             pos_contents = [r["content"] for r in positive]
             neg_contents = [r["content"] for r in negative]
-            if len(pos_contents) >= 3:
-                st.session_state.generated_positive = generate_reviews(pos_contents, review_count)
-            if len(neg_contents) >= 3:
-                st.session_state.generated_negative = generate_reviews(neg_contents, review_count)
+            if pos_contents:
+                st.session_state.generated_positive = generate_reviews_with_gemini(
+                    pos_contents, review_count, "positive"
+                )
+            if neg_contents:
+                st.session_state.generated_negative = generate_reviews_with_gemini(
+                    neg_contents, review_count, "negative"
+                )
             st.rerun()
