@@ -81,8 +81,8 @@ def fetch_reviews(goods_number, count=10, max_retries=3):
 
 
 # ─── Gemini AI Review Generation ───
-def call_gemini(prompt, api_key):
-    """Gemini API REST 호출"""
+def call_gemini(prompt, api_key, max_retries=3):
+    """Gemini API REST 호출 (429 자동 재시도 포함)"""
     url = f"{GEMINI_API_URL}?key={api_key}"
     payload = json.dumps({
         "contents": [{"parts": [{"text": prompt}]}],
@@ -92,21 +92,27 @@ def call_gemini(prompt, api_key):
         },
     }).encode("utf-8")
 
-    req = urllib.request.Request(
-        url,
-        data=payload,
-        headers={"Content-Type": "application/json"},
-        method="POST",
-    )
-    try:
-        with urllib.request.urlopen(req, timeout=30) as resp:
-            data = json.loads(resp.read().decode("utf-8"))
-            return data["candidates"][0]["content"]["parts"][0]["text"]
-    except urllib.error.HTTPError as e:
-        error_body = e.read().decode("utf-8", errors="ignore")
-        raise Exception(f"Gemini API 오류 ({e.code}): {error_body[:200]}")
-    except Exception as e:
-        raise Exception(f"Gemini 요청 실패: {e}")
+    for attempt in range(max_retries):
+        req = urllib.request.Request(
+            url,
+            data=payload,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=30) as resp:
+                data = json.loads(resp.read().decode("utf-8"))
+                return data["candidates"][0]["content"]["parts"][0]["text"]
+        except urllib.error.HTTPError as e:
+            error_body = e.read().decode("utf-8", errors="ignore")
+            if e.code == 429 and attempt < max_retries - 1:
+                wait = 2 ** (attempt + 1)
+                st.info(f"API 할당량 제한, {wait}초 후 재시도... ({attempt + 1}/{max_retries})")
+                time.sleep(wait)
+                continue
+            raise Exception(f"Gemini API 오류 ({e.code}): {error_body[:200]}")
+        except Exception as e:
+            raise Exception(f"Gemini 요청 실패: {e}")
 
 
 def generate_reviews_with_gemini(reviews_text, count=3, sentiment="positive", api_key=""):
