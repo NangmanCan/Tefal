@@ -31,8 +31,8 @@ def extract_goods_number(url_or_text):
     return None
 
 
-def fetch_reviews(goods_number, pages=3, size=10, max_retries=3):
-    """올리브영 리뷰 API에서 리뷰 자동 수집 (재시도 포함)"""
+def fetch_reviews(goods_number, pages=5, size=10, max_retries=3):
+    """올리브영 리뷰 API에서 리뷰 자동 수집 (최신순, 재시도 포함)"""
     all_reviews = []
 
     for attempt in range(max_retries):
@@ -191,10 +191,10 @@ def extract_keywords(reviews_text, top_n=15):
 # ─── Session State ───
 if "fetched_reviews" not in st.session_state:
     st.session_state.fetched_reviews = []
-if "generated_reviews" not in st.session_state:
-    st.session_state.generated_reviews = []
-if "goods_number" not in st.session_state:
-    st.session_state.goods_number = None
+if "generated_positive" not in st.session_state:
+    st.session_state.generated_positive = []
+if "generated_negative" not in st.session_state:
+    st.session_state.generated_negative = []
 
 
 # ─── UI: Step 1 - URL 입력 ───
@@ -207,7 +207,7 @@ product_url = st.text_input(
 
 col_pages, col_btn = st.columns([2, 2])
 with col_pages:
-    max_pages = st.slider("수집할 리뷰 페이지 수", 1, 10, 3, help="페이지당 10개 리뷰")
+    max_pages = st.slider("수집할 리뷰 페이지 수", 1, 20, 5, help="페이지당 10개 리뷰 (5점/1점 분리를 위해 많이 수집 권장)")
 with col_btn:
     st.write("")
     fetch_clicked = st.button("📥 리뷰 자동 수집", use_container_width=True, type="primary")
@@ -217,75 +217,153 @@ if fetch_clicked and product_url:
     if not goods_number:
         st.error("올리브영 상품 URL에서 상품번호를 찾을 수 없습니다.")
     else:
-        st.session_state.goods_number = goods_number
-        with st.spinner(f"상품 {goods_number}의 리뷰를 수집 중..."):
+        with st.spinner(f"상품 {goods_number}의 리뷰를 수집 중... (최신순)"):
             reviews = fetch_reviews(goods_number, pages=max_pages)
             if reviews:
+                # 날짜 최신순 정렬
+                reviews.sort(key=lambda x: x["date"], reverse=True)
                 st.session_state.fetched_reviews = reviews
-                st.session_state.generated_reviews = []
-                st.success(f"총 {len(reviews)}개 리뷰를 수집했습니다!")
+                st.session_state.generated_positive = []
+                st.session_state.generated_negative = []
+
+                # 별점별 통계
+                positive = [r for r in reviews if r["score"] == 5]
+                negative = [r for r in reviews if r["score"] == 1]
+                st.success(
+                    f"총 {len(reviews)}개 리뷰 수집 완료! "
+                    f"(⭐5점: {len(positive)}개 | ⭐1점: {len(negative)}개)"
+                )
             else:
                 st.warning("리뷰를 가져올 수 없습니다. URL을 확인해주세요.")
 
-# ─── UI: Step 2 - 수집된 리뷰 확인 ───
+# ─── UI: Step 2 - 수집된 리뷰 확인 (5점/1점 분리) ───
 if st.session_state.fetched_reviews:
+    reviews = st.session_state.fetched_reviews
+    positive = [r for r in reviews if r["score"] == 5]
+    negative = [r for r in reviews if r["score"] == 1]
+
     st.divider()
-    st.subheader(f"2단계: 수집된 리뷰 ({len(st.session_state.fetched_reviews)}개)")
+    st.subheader("2단계: 수집된 리뷰 확인")
 
-    with st.expander("수집된 리뷰 보기", expanded=False):
-        for i, r in enumerate(st.session_state.fetched_reviews):
-            score_stars = "⭐" * r["score"]
-            st.markdown(f"**{i+1}.** {score_stars} _{r['nickname']}_ ({r['date']})")
-            st.caption(r["content"][:200])
+    tab_pos, tab_neg, tab_all = st.tabs([
+        f"⭐ 5점 리뷰 ({len(positive)}개)",
+        f"💀 1점 리뷰 ({len(negative)}개)",
+        f"📋 전체 리뷰 ({len(reviews)}개)",
+    ])
 
-    # ─── UI: Step 3 - 리뷰 생성 ───
+    with tab_pos:
+        if positive:
+            for i, r in enumerate(positive):
+                st.markdown(f"**{i+1}.** ⭐⭐⭐⭐⭐ _{r['nickname']}_ ({r['date']})")
+                st.caption(r["content"][:300])
+        else:
+            st.info("5점 리뷰가 없습니다. 페이지 수를 늘려서 다시 수집해보세요.")
+
+    with tab_neg:
+        if negative:
+            for i, r in enumerate(negative):
+                st.markdown(f"**{i+1}.** ⭐ _{r['nickname']}_ ({r['date']})")
+                st.caption(r["content"][:300])
+        else:
+            st.info("1점 리뷰가 없습니다. 페이지 수를 늘려서 다시 수집해보세요.")
+
+    with tab_all:
+        for i, r in enumerate(reviews):
+            stars = "⭐" * r["score"]
+            st.markdown(f"**{i+1}.** {stars} _{r['nickname']}_ ({r['date']})")
+            st.caption(r["content"][:300])
+
+    # ─── UI: Step 3 - 리뷰 생성 (5점/1점 각각) ───
     st.divider()
     st.subheader("3단계: 새 리뷰 생성")
 
     col_count, col_gen = st.columns([2, 2])
     with col_count:
-        review_count = st.slider("생성할 리뷰 수", 1, 10, 3)
+        review_count = st.slider("별점별 생성할 리뷰 수", 1, 10, 3)
     with col_gen:
         st.write("")
         generate_clicked = st.button(
-            "✨ 리뷰 생성하기", use_container_width=True
+            "✨ 리뷰 생성하기", use_container_width=True, type="primary"
         )
 
     if generate_clicked:
-        contents = [r["content"] for r in st.session_state.fetched_reviews]
-        if len(contents) < 3:
-            st.warning("수집된 리뷰가 부족합니다. 더 많은 페이지를 수집해주세요.")
-        else:
-            with st.spinner("리뷰를 조합하여 새로운 리뷰를 생성 중..."):
-                generated = generate_reviews(contents, review_count)
-                st.session_state.generated_reviews = generated
+        pos_contents = [r["content"] for r in positive]
+        neg_contents = [r["content"] for r in negative]
 
-    # ─── 생성된 리뷰 출력 ───
-    if st.session_state.generated_reviews:
+        gen_pos = []
+        gen_neg = []
+
+        if len(pos_contents) >= 3:
+            gen_pos = generate_reviews(pos_contents, review_count)
+        if len(neg_contents) >= 3:
+            gen_neg = generate_reviews(neg_contents, review_count)
+
+        if not gen_pos and not gen_neg:
+            st.warning("5점 또는 1점 리뷰가 각각 3개 이상 필요합니다. 페이지 수를 늘려서 다시 수집해주세요.")
+        else:
+            st.session_state.generated_positive = gen_pos
+            st.session_state.generated_negative = gen_neg
+
+    # ─── 생성된 리뷰 출력 (탭 분리) ───
+    if st.session_state.generated_positive or st.session_state.generated_negative:
         st.divider()
         st.subheader("생성된 리뷰")
 
-        for i, review in enumerate(st.session_state.generated_reviews):
-            with st.container(border=True):
-                st.markdown(f"**리뷰 #{i + 1}**")
-                st.write(review)
+        gen_tab_pos, gen_tab_neg = st.tabs([
+            f"⭐ 5점 기반 생성 ({len(st.session_state.generated_positive)}개)",
+            f"💀 1점 기반 생성 ({len(st.session_state.generated_negative)}개)",
+        ])
 
-        # 키워드 분석
+        with gen_tab_pos:
+            if st.session_state.generated_positive:
+                for i, review in enumerate(st.session_state.generated_positive):
+                    with st.container(border=True):
+                        st.markdown(f"**긍정 리뷰 #{i + 1}**")
+                        st.write(review)
+            else:
+                st.info("5점 리뷰가 부족하여 생성하지 못했습니다.")
+
+        with gen_tab_neg:
+            if st.session_state.generated_negative:
+                for i, review in enumerate(st.session_state.generated_negative):
+                    with st.container(border=True):
+                        st.markdown(f"**부정 리뷰 #{i + 1}**")
+                        st.write(review)
+            else:
+                st.info("1점 리뷰가 부족하여 생성하지 못했습니다.")
+
+        # 키워드 분석 (5점 vs 1점)
         st.divider()
-        st.subheader("📊 리뷰 키워드 분석")
-        contents = [r["content"] for r in st.session_state.fetched_reviews]
-        keywords = extract_keywords(contents)
-        if keywords:
-            keyword_str = "  ".join(
-                [f"`{word}` ({count})" for word, count in keywords]
-            )
-            st.markdown(keyword_str)
+        st.subheader("📊 키워드 비교 분석")
+
+        kw_col_pos, kw_col_neg = st.columns(2)
+
+        with kw_col_pos:
+            st.markdown("**⭐ 5점 리뷰 키워드**")
+            pos_contents = [r["content"] for r in positive]
+            if pos_contents:
+                kw = extract_keywords(pos_contents)
+                if kw:
+                    st.markdown("  ".join([f"`{w}` ({c})" for w, c in kw]))
+            else:
+                st.caption("데이터 없음")
+
+        with kw_col_neg:
+            st.markdown("**💀 1점 리뷰 키워드**")
+            neg_contents = [r["content"] for r in negative]
+            if neg_contents:
+                kw = extract_keywords(neg_contents)
+                if kw:
+                    st.markdown("  ".join([f"`{w}` ({c})" for w, c in kw]))
+            else:
+                st.caption("데이터 없음")
 
         # 재생성 버튼
         if st.button("🔄 다시 생성하기"):
-            contents = [r["content"] for r in st.session_state.fetched_reviews]
-            generated = generate_reviews(
-                contents, len(st.session_state.generated_reviews)
-            )
-            st.session_state.generated_reviews = generated
+            pos_contents = [r["content"] for r in positive]
+            neg_contents = [r["content"] for r in negative]
+            if len(pos_contents) >= 3:
+                st.session_state.generated_positive = generate_reviews(pos_contents, review_count)
+            if len(neg_contents) >= 3:
+                st.session_state.generated_negative = generate_reviews(neg_contents, review_count)
             st.rerun()
