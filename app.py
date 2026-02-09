@@ -31,64 +31,51 @@ def extract_goods_number(url_or_text):
     return None
 
 
-def fetch_reviews(goods_number, pages=5, size=10, max_retries=3):
-    """올리브영 리뷰 API에서 리뷰 자동 수집 (최신순, 재시도 포함)"""
-    all_reviews = []
-
+def fetch_reviews(goods_number, count=10, max_retries=3):
+    """올리브영 리뷰 API에서 리뷰 자동 수집 (최신순, API 1회 호출)"""
     for attempt in range(max_retries):
-        all_reviews = []
         browser = IMPERSONATE_BROWSERS[attempt % len(IMPERSONATE_BROWSERS)]
-        success = False
+        try:
+            resp = cffi_requests.post(
+                REVIEW_API,
+                json={"goodsNumber": goods_number, "page": 1, "size": count},
+                headers={
+                    "Accept": "application/json",
+                    "Content-Type": "application/json",
+                },
+                impersonate=browser,
+                timeout=15,
+            )
+            if resp.status_code == 403:
+                st.warning(f"차단 감지, 재시도 중... ({attempt + 1}/{max_retries})")
+                time.sleep(2 ** attempt)
+                continue
+            if resp.status_code != 200:
+                st.warning(f"API 응답 오류: {resp.status_code}")
+                return []
 
-        for page in range(1, pages + 1):
-            try:
-                resp = cffi_requests.post(
-                    REVIEW_API,
-                    json={"goodsNumber": goods_number, "page": page, "size": size},
-                    headers={
-                        "Accept": "application/json",
-                        "Content-Type": "application/json",
-                    },
-                    impersonate=browser,
-                    timeout=15,
-                )
-                if resp.status_code == 403:
-                    st.warning(f"차단 감지, 브라우저 변경 후 재시도 중... ({attempt + 1}/{max_retries})")
-                    break
-                if resp.status_code != 200:
-                    st.warning(f"API 응답 오류: {resp.status_code}")
-                    break
+            data = resp.json()
+            if data.get("status") != "SUCCESS":
+                st.warning(f"API 상태: {data.get('status')} - {data.get('message', '')}")
+                return []
 
-                data = resp.json()
-                api_status = data.get("status", "")
-                if api_status != "SUCCESS":
-                    st.warning(f"API 상태: {api_status} - {data.get('message', '')}")
-                    break
+            result = []
+            for r in data.get("data") or []:
+                content = r.get("content", "").strip()
+                if content:
+                    result.append({
+                        "content": content,
+                        "score": r.get("reviewScore", 0),
+                        "nickname": r.get("profileDto", {}).get("memberNickname", ""),
+                        "date": r.get("createdDateTime", ""),
+                    })
+            return result
+        except Exception as e:
+            st.warning(f"요청 오류: {e}")
+            if attempt < max_retries - 1:
+                time.sleep(2 ** attempt)
 
-                reviews = data.get("data") or []
-                if not reviews:
-                    break
-                for r in reviews:
-                    content = r.get("content", "").strip()
-                    if content:
-                        all_reviews.append({
-                            "content": content,
-                            "score": r.get("reviewScore", 0),
-                            "nickname": r.get("profileDto", {}).get("memberNickname", ""),
-                            "date": r.get("createdDateTime", ""),
-                        })
-                success = True
-            except Exception as e:
-                st.warning(f"요청 오류: {e}")
-                break
-
-        if success and all_reviews:
-            return all_reviews
-
-        if attempt < max_retries - 1:
-            time.sleep(2 ** attempt)
-
-    return all_reviews
+    return []
 
 
 # ─── Review Generation ───
@@ -205,9 +192,9 @@ product_url = st.text_input(
     placeholder="https://www.oliveyoung.co.kr/store/goods/getGoodsDetail.do?goodsNo=A000000243621",
 )
 
-col_pages, col_btn = st.columns([2, 2])
-with col_pages:
-    max_pages = st.slider("수집할 리뷰 페이지 수", 1, 20, 5, help="페이지당 10개 리뷰 (5점/1점 분리를 위해 많이 수집 권장)")
+col_count, col_btn = st.columns([2, 2])
+with col_count:
+    review_limit = st.slider("수집할 리뷰 수", 10, 30, 10, step=10, help="최신순으로 가져옵니다")
 with col_btn:
     st.write("")
     fetch_clicked = st.button("📥 리뷰 자동 수집", use_container_width=True, type="primary")
@@ -218,7 +205,7 @@ if fetch_clicked and product_url:
         st.error("올리브영 상품 URL에서 상품번호를 찾을 수 없습니다.")
     else:
         with st.spinner(f"상품 {goods_number}의 리뷰를 수집 중... (최신순)"):
-            reviews = fetch_reviews(goods_number, pages=max_pages)
+            reviews = fetch_reviews(goods_number, count=review_limit)
             if reviews:
                 # 날짜 최신순 정렬
                 reviews.sort(key=lambda x: x["date"], reverse=True)
