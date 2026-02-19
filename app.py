@@ -13,8 +13,12 @@ st.caption("올리브영 상품 URL을 입력하면 리뷰를 자동 수집하�
 # ─── Constants ───
 REVIEW_API = "https://m.oliveyoung.co.kr/review/api/v2/reviews"
 IMPERSONATE_BROWSERS = ["chrome120", "chrome124", "safari17_0"]
-GEMINI_API_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash-lite:generateContent"
 GEMINI_API_KEY = "AIzaSyAHlHAWdekllJEEwITQ5xJnzdhLDeqjg8w"
+GEMINI_MODELS = [
+    "gemini-2.0-flash-lite",
+    "gemini-2.0-flash",
+    "gemini-1.5-flash",
+]
 
 
 # ─── API Functions ───
@@ -81,9 +85,8 @@ def fetch_reviews(goods_number, count=10, max_retries=3):
 
 
 # ─── Gemini AI Review Generation ───
-def call_gemini(prompt, max_retries=3):
-    """Gemini API REST 호출 (429 자동 재시도 포함)"""
-    url = f"{GEMINI_API_URL}?key={GEMINI_API_KEY}"
+def call_gemini(prompt):
+    """Gemini API REST 호출 - 여러 모델 자동 시도"""
     payload = json.dumps({
         "contents": [{"parts": [{"text": prompt}]}],
         "generationConfig": {
@@ -92,27 +95,28 @@ def call_gemini(prompt, max_retries=3):
         },
     }).encode("utf-8")
 
-    for attempt in range(max_retries):
-        req = urllib.request.Request(
-            url,
-            data=payload,
-            headers={"Content-Type": "application/json"},
-            method="POST",
-        )
-        try:
-            with urllib.request.urlopen(req, timeout=30) as resp:
-                data = json.loads(resp.read().decode("utf-8"))
-                return data["candidates"][0]["content"]["parts"][0]["text"]
-        except urllib.error.HTTPError as e:
-            error_body = e.read().decode("utf-8", errors="ignore")
-            if e.code == 429 and attempt < max_retries - 1:
-                wait = 2 ** (attempt + 1)
-                st.info(f"API 할당량 제한, {wait}초 후 재시도... ({attempt + 1}/{max_retries})")
-                time.sleep(wait)
+    last_error = None
+    for model in GEMINI_MODELS:
+        for api_ver in ["v1beta", "v1"]:
+            url = f"https://generativelanguage.googleapis.com/{api_ver}/models/{model}:generateContent?key={GEMINI_API_KEY}"
+            req = urllib.request.Request(
+                url,
+                data=payload,
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+            try:
+                with urllib.request.urlopen(req, timeout=30) as resp:
+                    data = json.loads(resp.read().decode("utf-8"))
+                    return data["candidates"][0]["content"]["parts"][0]["text"]
+            except urllib.error.HTTPError as e:
+                last_error = f"{model} ({api_ver}): {e.code} - {e.read().decode('utf-8', errors='ignore')[:200]}"
                 continue
-            raise Exception(f"Gemini API 오류 ({e.code}): {error_body[:300]}")
-        except Exception as e:
-            raise Exception(f"Gemini 요청 실패: {e}")
+            except Exception as e:
+                last_error = f"{model} ({api_ver}): {e}"
+                continue
+
+    raise Exception(f"모든 모델 실패. 마지막 오류: {last_error}")
 
 
 def generate_reviews_with_gemini(reviews_text, count=3, sentiment="positive"):
@@ -183,6 +187,17 @@ if "generated_positive" not in st.session_state:
     st.session_state.generated_positive = []
 if "generated_negative" not in st.session_state:
     st.session_state.generated_negative = []
+
+# ─── Sidebar: API 테스트 ───
+with st.sidebar:
+    st.markdown("### Gemini API 상태")
+    if st.button("API 연결 테스트"):
+        with st.spinner("테스트 중..."):
+            try:
+                result = call_gemini("안녕이라고만 답해줘")
+                st.success(f"연결 성공! 응답: {result[:50]}")
+            except Exception as e:
+                st.error(f"실패: {e}")
 
 # ─── UI: Step 1 - URL 입력 ───
 st.subheader("1단계: 올리브영 상품 URL 입력")
