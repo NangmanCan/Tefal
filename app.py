@@ -5,6 +5,7 @@ import json
 import time
 import urllib.request
 from collections import Counter
+from datetime import datetime, timedelta
 
 st.set_page_config(page_title="올리브영 리뷰 생성기", layout="wide")
 st.title("🧴 올리브영 리뷰 생성기")
@@ -17,7 +18,6 @@ GEMINI_API_KEY = "AIzaSyDwklrLZvb-SgfVZgCfGaoxErj1LHuYEIc"
 GEMINI_MODELS = [
     "gemini-2.0-flash-lite",
     "gemini-2.0-flash",
-    "gemini-1.5-flash",
 ]
 
 
@@ -84,8 +84,23 @@ def fetch_reviews(goods_number, count=10, max_retries=3):
     return []
 
 
+def filter_reviews_by_months(reviews, months=3):
+    """최근 N개월 이내 리뷰만 필터링"""
+    cutoff = datetime.now() - timedelta(days=months * 30)
+    filtered = []
+    for r in reviews:
+        try:
+            date_str = r["date"][:10]
+            review_date = datetime.strptime(date_str, "%Y-%m-%d")
+            if review_date >= cutoff:
+                filtered.append(r)
+        except (ValueError, IndexError):
+            filtered.append(r)
+    return filtered
+
+
 # ─── Gemini AI Review Generation ───
-def call_gemini(prompt, show_debug=False):
+def call_gemini(prompt):
     """Gemini API REST 호출 - 여러 모델 자동 시도"""
     payload = json.dumps({
         "contents": [{"parts": [{"text": prompt}]}],
@@ -107,23 +122,16 @@ def call_gemini(prompt, show_debug=False):
         try:
             with urllib.request.urlopen(req, timeout=30) as resp:
                 data = json.loads(resp.read().decode("utf-8"))
-                if show_debug:
-                    st.sidebar.success(f"{model}: 성공!")
                 return data["candidates"][0]["content"]["parts"][0]["text"]
         except urllib.error.HTTPError as e:
             err_body = e.read().decode("utf-8", errors="ignore")[:300]
-            errors.append(f"{model}: HTTP {e.code}\n{err_body}")
-            if show_debug:
-                st.sidebar.error(f"{model}: HTTP {e.code}")
-                st.sidebar.caption(err_body[:150])
+            errors.append(f"{model}: HTTP {e.code} - {err_body[:150]}")
             continue
         except Exception as e:
             errors.append(f"{model}: {e}")
-            if show_debug:
-                st.sidebar.error(f"{model}: {e}")
             continue
 
-    raise Exception("모든 모델 실패:\n" + "\n---\n".join(errors))
+    raise Exception("모든 모델 실패:\n" + "\n".join(errors))
 
 
 def generate_reviews_with_gemini(reviews_text, count=3, sentiment="positive"):
@@ -195,17 +203,6 @@ if "generated_positive" not in st.session_state:
 if "generated_negative" not in st.session_state:
     st.session_state.generated_negative = []
 
-# ─── Sidebar: API 테스트 ───
-with st.sidebar:
-    st.markdown("### Gemini API 상태")
-    if st.button("API 연결 테스트"):
-        with st.spinner("모델별 테스트 중..."):
-            try:
-                result = call_gemini("안녕이라고만 답해줘", show_debug=True)
-                st.success(f"응답: {result[:50]}")
-            except Exception as e:
-                st.error("모든 모델 실패 (위 결과 참고)")
-
 # ─── UI: Step 1 - URL 입력 ───
 st.subheader("1단계: 올리브영 상품 URL 입력")
 
@@ -226,20 +223,19 @@ if fetch_clicked and product_url:
     if not goods_number:
         st.error("올리브영 상품 URL에서 상품번호를 찾을 수 없습니다.")
     else:
-        with st.spinner(f"상품 {goods_number}의 리뷰를 수집 중... (최신순)"):
+        with st.spinner(f"상품 {goods_number}의 리뷰를 수집 중... (최신순, 최근 3개월)"):
             reviews = fetch_reviews(goods_number, count=review_limit)
             if reviews:
-                # 날짜 최신순 정렬
                 reviews.sort(key=lambda x: x["date"], reverse=True)
+                reviews = filter_reviews_by_months(reviews, months=3)
                 st.session_state.fetched_reviews = reviews
                 st.session_state.generated_positive = []
                 st.session_state.generated_negative = []
 
-                # 별점별 통계
                 positive = [r for r in reviews if r["score"] == 5]
                 negative = [r for r in reviews if r["score"] == 1]
                 st.success(
-                    f"총 {len(reviews)}개 리뷰 수집 완료! "
+                    f"최근 3개월 리뷰 {len(reviews)}개 수집 완료! "
                     f"(⭐5점: {len(positive)}개 | ⭐1점: {len(negative)}개)"
                 )
             else:
@@ -266,7 +262,7 @@ if st.session_state.fetched_reviews:
                 st.markdown(f"**{i+1}.** ⭐⭐⭐⭐⭐ _{r['nickname']}_ ({r['date']})")
                 st.caption(r["content"][:300])
         else:
-            st.info("5점 리뷰가 없습니다. 페이지 수를 늘려서 다시 수집해보세요.")
+            st.info("5점 리뷰가 없습니다. 수집 수를 늘려서 다시 시도해보세요.")
 
     with tab_neg:
         if negative:
@@ -274,7 +270,7 @@ if st.session_state.fetched_reviews:
                 st.markdown(f"**{i+1}.** ⭐ _{r['nickname']}_ ({r['date']})")
                 st.caption(r["content"][:300])
         else:
-            st.info("1점 리뷰가 없습니다. 페이지 수를 늘려서 다시 수집해보세요.")
+            st.info("1점 리뷰가 없습니다. 수집 수를 늘려서 다시 시도해보세요.")
 
     with tab_all:
         for i, r in enumerate(reviews):
