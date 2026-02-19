@@ -85,7 +85,7 @@ def fetch_reviews(goods_number, count=10, max_retries=3):
 
 
 # ─── Gemini AI Review Generation ───
-def call_gemini(prompt):
+def call_gemini(prompt, show_debug=False):
     """Gemini API REST 호출 - 여러 모델 자동 시도"""
     payload = json.dumps({
         "contents": [{"parts": [{"text": prompt}]}],
@@ -95,28 +95,35 @@ def call_gemini(prompt):
         },
     }).encode("utf-8")
 
-    last_error = None
+    errors = []
     for model in GEMINI_MODELS:
-        for api_ver in ["v1beta", "v1"]:
-            url = f"https://generativelanguage.googleapis.com/{api_ver}/models/{model}:generateContent?key={GEMINI_API_KEY}"
-            req = urllib.request.Request(
-                url,
-                data=payload,
-                headers={"Content-Type": "application/json"},
-                method="POST",
-            )
-            try:
-                with urllib.request.urlopen(req, timeout=30) as resp:
-                    data = json.loads(resp.read().decode("utf-8"))
-                    return data["candidates"][0]["content"]["parts"][0]["text"]
-            except urllib.error.HTTPError as e:
-                last_error = f"{model} ({api_ver}): {e.code} - {e.read().decode('utf-8', errors='ignore')[:200]}"
-                continue
-            except Exception as e:
-                last_error = f"{model} ({api_ver}): {e}"
-                continue
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={GEMINI_API_KEY}"
+        req = urllib.request.Request(
+            url,
+            data=payload,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=30) as resp:
+                data = json.loads(resp.read().decode("utf-8"))
+                if show_debug:
+                    st.sidebar.success(f"{model}: 성공!")
+                return data["candidates"][0]["content"]["parts"][0]["text"]
+        except urllib.error.HTTPError as e:
+            err_body = e.read().decode("utf-8", errors="ignore")[:300]
+            errors.append(f"{model}: HTTP {e.code}\n{err_body}")
+            if show_debug:
+                st.sidebar.error(f"{model}: HTTP {e.code}")
+                st.sidebar.caption(err_body[:150])
+            continue
+        except Exception as e:
+            errors.append(f"{model}: {e}")
+            if show_debug:
+                st.sidebar.error(f"{model}: {e}")
+            continue
 
-    raise Exception(f"모든 모델 실패. 마지막 오류: {last_error}")
+    raise Exception("모든 모델 실패:\n" + "\n---\n".join(errors))
 
 
 def generate_reviews_with_gemini(reviews_text, count=3, sentiment="positive"):
@@ -192,12 +199,12 @@ if "generated_negative" not in st.session_state:
 with st.sidebar:
     st.markdown("### Gemini API 상태")
     if st.button("API 연결 테스트"):
-        with st.spinner("테스트 중..."):
+        with st.spinner("모델별 테스트 중..."):
             try:
-                result = call_gemini("안녕이라고만 답해줘")
-                st.success(f"연결 성공! 응답: {result[:50]}")
+                result = call_gemini("안녕이라고만 답해줘", show_debug=True)
+                st.success(f"응답: {result[:50]}")
             except Exception as e:
-                st.error(f"실패: {e}")
+                st.error("모든 모델 실패 (위 결과 참고)")
 
 # ─── UI: Step 1 - URL 입력 ───
 st.subheader("1단계: 올리브영 상품 URL 입력")
