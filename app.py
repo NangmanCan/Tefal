@@ -14,7 +14,7 @@ st.caption("올리브영 상품 URL을 입력하면 리뷰를 자동 수집하�
 # ─── Constants ───
 REVIEW_API = "https://m.oliveyoung.co.kr/review/api/v2/reviews"
 IMPERSONATE_BROWSERS = ["chrome120", "chrome124", "safari17_0"]
-GEMINI_API_KEY = "AIzaSyDwklrLZvb-SgfVZgCfGaoxErj1LHuYEIc"
+GEMINI_API_KEY = st.secrets.get("GEMINI_API_KEY", "")
 GEMINI_MODELS = [
     "gemini-2.0-flash-lite",
     "gemini-2.0-flash",
